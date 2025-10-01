@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Real-Time Chat Application — Debug</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        #chat { height: 300px; overflow-y: auto; white-space: pre-wrap; }
+        .status-connected { color: green; }
+        .status-disconnected { color: red; }
+    </style>
+</head>
+<body>
+<div class="container mt-4">
+    <h1 class="text-center">Real Time Chat Application</h1>
+
+    <div class="mb-2">
+        Status: <span id="status" class="status-disconnected">Disconnected</span>
+        &nbsp; | &nbsp;
+        Endpoint: <span id="endpoint">unknown</span>
+    </div>
+
+    <div id="chat" class="border rounded p-3 mb-3"></div>
+
+    <div class="input-group mb-3">
+        <input id="senderInput" type="text" class="form-control" placeholder="Your name..." />
+    </div>
+
+    <div class="input-group mb-3">
+        <input id="messageInput" type="text" class="form-control" placeholder="Message..." />
+        <button id="sendMessage" class="btn btn-primary" disabled>Send</button>
+    </div>
+</div>
+
+<script>
+    var stompClient = null;
+    var currentEndpoint = null;
+
+    function setStatus(connected, endpoint) {
+      var statusEl = document.getElementById('status');
+      var endpointEl = document.getElementById('endpoint');
+      if (connected) {
+        statusEl.textContent = 'Connected';
+        statusEl.className = 'status-connected';
+      } else {
+        statusEl.textContent = 'Disconnected';
+        statusEl.className = 'status-disconnected';
+      }
+      endpointEl.textContent = endpoint || 'none';
+      document.getElementById('sendMessage').disabled = !connected;
+    }
+
+    function appendToChat(text, cls) {
+      var chat = document.getElementById('chat');
+      var div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    // Try endpoints in order until one connects
+    function connectWithFallback(endpoints) {
+      if (!endpoints || endpoints.length === 0) {
+        appendToChat('No endpoints provided to try.', 'text-danger');
+        setStatus(false, 'none');
+        return;
+      }
+      var attempt = 0;
+
+      function tryNext() {
+        if (attempt >= endpoints.length) {
+          appendToChat('All endpoints failed to connect. Check server SockJS path and console for errors.', 'text-danger');
+          setStatus(false, 'none');
+          return;
+        }
+        var ep = endpoints[attempt++];
+        currentEndpoint = ep;
+        document.getElementById('endpoint').textContent = ep;
+        appendToChat('Trying endpoint: ' + ep);
+        tryConnect(ep, function(success) {
+          if (!success) {
+            appendToChat('Failed to connect to ' + ep + ' — trying next if any.', 'text-warning');
+            // small delay before next try
+            setTimeout(tryNext, 300);
+          }
+        });
+      }
+
+      tryNext();
+    }
+
+    function tryConnect(endpoint, callback) {
+      try {
+        var sock = new SockJS(endpoint);
+      } catch (e) {
+        console.error('SockJS constructor error for endpoint', endpoint, e);
+        callback(false);
+        return;
+      }
+
+      var client = Stomp.over(sock);
+
+      // quieter console — keep but route to our debugging
+      client.debug = function(msg) { console.debug('[STOMP DEBUG]', msg); };
+
+      // attempt connect
+      client.connect({}, function(frame) {
+        console.info('Connected to STOMP at', endpoint, frame);
+        stompClient = client;
+        currentEndpoint = endpoint;
+        setStatus(true, endpoint);
+        appendToChat('Connected to ' + endpoint, 'text-success');
+
+        // Subscribe to /topic/messages
+        client.subscribe('/topic/messages', function(message) {
+          // if body is JSON, parse; otherwise show raw body
+          var body = message.body || '';
+          try {
+            var parsed = JSON.parse(body);
+            // expected { sender, content }
+            var sender = parsed.sender || 'Unknown';
+            var content = parsed.content || JSON.stringify(parsed);
+            appendToChat(sender + ': ' + content);
+          } catch (e) {
+            // not JSON — show raw
+            appendToChat('RAW: ' + body);
+          }
+        });
+
+        // callback says success
+        callback(true);
+
+      }, function(error) {
+        console.error('STOMP connect error for endpoint', endpoint, error);
+        try {
+          // clean up client/socket if possible
+          if (client && client.ws) client.ws.close();
+        } catch(e){/*ignore*/}
+        setStatus(false, endpoint + ' (error)');
+        callback(false);
+      });
+    }
+
+    function sendMessage() {
+      if (!stompClient) {
+        appendToChat('Not connected — cannot send.', 'text-danger');
+        return;
+      }
+      var sender = document.getElementById('senderInput').value.trim() || 'Anonymous';
+      var content = document.getElementById('messageInput').value.trim();
+      if (content === '') return;
+      var chatMessage = { sender: sender, content: content };
+      // endpoint: change if your server expects a different mapping
+      stompClient.send('/app/sendMessage', {}, JSON.stringify(chatMessage));
+      document.getElementById('messageInput').value = '';
+    }
+
+    // DOM ready wiring
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById('sendMessage').addEventListener('click', sendMessage);
+      document.getElementById('messageInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          sendMessage();
+          e.preventDefault();
+        }
+      });
+
+      // Try common SockJS endpoints — adjust order or add yours
+      var endpointsToTry = ['/chat', '/ws', '/stomp', '/socket'];
+      connectWithFallback(endpointsToTry);
+    });
+
+    // Expose debugging controls in console if you want:
+    window._stompDebug = {
+      stompClient: function(){ return stompClient; },
+      disconnect: function(){ if(stompClient) stompClient.disconnect(); stompClient = null; setStatus(false, 'manual'); appendToChat('Disconnected (manual)'); }
+    };
+</script>
+</body>
+</html>
